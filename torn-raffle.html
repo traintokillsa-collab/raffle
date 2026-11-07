@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Torn raffle tracker</title>
+<style>
+:root{--bg:#15181d;--panel:#1d2128;--line:#2c323c;--text:#e7e4dc;--mute:#9aa0a8;--acc:#9bb33e;--warn:#e0883a;--bad:#d9534f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:16px;max-width:860px;margin-inline:auto}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:0 0 10px}
+p.sub{color:var(--mute);margin:0 0 16px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+label{display:block;font-size:13px;color:var(--mute)}
+input{width:100%;margin-top:3px;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:8px;font:inherit}
+button{background:var(--acc);color:#111;border:0;border-radius:6px;padding:9px 14px;font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+button:disabled{opacity:.4;cursor:not-allowed}
+button:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.bar{height:14px;background:var(--bg);border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.bar>div{height:100%;background:var(--acc);width:0;transition:width .4s}
+.stats{display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;color:var(--mute)}
+.stats b{color:var(--text)}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--line)}
+th{color:var(--mute);font-weight:500;font-size:13px}
+td.n{text-align:right;font-variant-numeric:tabular-nums}
+a{color:var(--acc)}
+.over{color:var(--warn)}
+#status{font-size:13px;color:var(--mute)}#status.err{color:var(--bad)}
+#winner{font-size:28px;font-weight:700;margin-top:12px;min-height:40px}
+#log{max-height:180px;overflow:auto;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:var(--mute);white-space:pre-wrap;word-break:break-word}
+.tiny{padding:3px 8px;font-size:13px}
+</style>
+</head>
+<body>
+<h1>Box of Grenades raffle</h1>
+<p class="sub">Keep this page open. It reads your Torn events and counts every box sent with your code word.</p>
+
+<section>
+  <h2>Setup</h2>
+  <div class="grid">
+    <label>API key<input id="key" type="password" autocomplete="off" placeholder="Limited access key"></label>
+    <label>Code word in message<input id="code" placeholder="RAFFLE"></label>
+    <label>Max tickets per player<input id="cap" type="number" min="1" value="15"></label>
+    <label>Ticket value ($)<input id="price" type="number" min="0" value="1150000"></label>
+    <label>Prize value ($)<input id="prize" type="number" min="0" value="150000000"></label>
+    <label>Item name<input id="item" value="Box of Grenades"></label>
+  </div>
+  <div class="row">
+    <button id="start">Start counting</button>
+    <button class="ghost" id="check">Check now</button>
+    <button class="ghost" id="stop">Pause</button>
+    <span id="status">Not running.</span>
+  </div>
+  <p class="sub" style="margin:10px 0 0;font-size:13px">Only events received after you press “Start counting” are counted. Your key stays in this browser.</p>
+</section>
+
+<section>
+  <h2>Break-even</h2>
+  <div class="bar"><div id="fill"></div></div>
+  <div class="stats">
+    <span>Tickets: <b id="tTickets">0</b> / <b id="tNeed">0</b></span>
+    <span>Value in: <b id="tValue">$0</b></span>
+    <span>Players: <b id="tPlayers">0</b></span>
+  </div>
+</section>
+
+<section>
+  <h2>Entries</h2>
+  <table>
+    <thead><tr><th>Player</th><th class="n">Sent</th><th class="n">Counted</th><th class="n">Refund</th><th></th></tr></thead>
+    <tbody id="rows"><tr><td colspan="5" style="color:var(--mute)">No entries yet.</td></tr></tbody>
+  </table>
+  <div class="row">
+    <button class="ghost" id="addManual">Add entry by hand</button>
+    <button class="ghost" id="exportBtn">Copy entry list</button>
+    <button class="ghost" id="reset">Reset everything</button>
+  </div>
+</section>
+
+<section>
+  <h2>Draw</h2>
+  <div class="row" style="margin-top:0">
+    <button id="draw" disabled>Start raffle</button>
+    <span id="drawNote" style="color:var(--mute);font-size:13px">Unlocks at break-even.</span>
+  </div>
+  <div id="winner" aria-live="polite"></div>
+  <div id="proof" class="sub" style="font-size:13px"></div>
+</section>
+
+<section>
+  <h2>Event log</h2>
+  <div id="log">Nothing yet.</div>
+</section>
+
+<script>
+const $ = id => document.getElementById(id);
+const LS = 'torn_raffle_v1';
+let S = { cfg:{}, seen:[], entries:{}, since:0, running:false, result:null };
+let timer = null;
+
+function load(){ try{ const r = localStorage.getItem(LS); if(r) S = Object.assign(S, JSON.parse(r)); }catch(e){} }
+function save(){ try{ localStorage.setItem(LS, JSON.stringify(S)); }catch(e){} }
+const fmt = n => '$' + Math.round(n).toLocaleString('en-US');
+function cfg(){
+  return { key:$('key').value.trim(), code:$('code').value.trim(), cap:Math.max(1,+$('cap').value||15),
+    price:+$('price').value||0, prize:+$('prize').value||0, item:$('item').value.trim()||'Box of Grenades' };
+}
+function setStatus(t, err){ $('status').textContent = t; $('status').className = err ? 'err' : ''; }
+function log(t){ const el=$('log'); el.textContent = (el.textContent==='Nothing yet.'?'':el.textContent+'\n') + new Date().toLocaleTimeString()+'  '+t; el.scrollTop = el.scrollHeight; }
+
+function counted(e){ return Math.min(e.sent, S.cfg.cap); }
+function totals(){
+  let t=0, p=0; for(const id in S.entries){ const c=counted(S.entries[id]); if(c>0){ t+=c; p++; } }
+  return {t,p};
+}
+
+function render(){
+  const c = S.cfg.cap || 15, ids = Object.keys(S.entries).sort((a,b)=>S.entries[b].sent-S.entries[a].sent);
+  const tb = $('rows'); tb.innerHTML='';
+  if(!ids.length){ tb.innerHTML='<tr><td colspan="5" style="color:var(--mute)">No entries yet.</td></tr>'; }
+  for(const id of ids){
+    const e=S.entries[id], cn=counted(e), ex=e.sent-cn, tr=document.createElement('tr');
+    const td1=document.createElement('td'), a=document.createElement('a');
+    a.href='https://www.torn.com/profiles.php?XID='+id; a.target='_blank'; a.rel='noopener';
+    a.textContent=(e.name||'Unknown')+' ['+id+']'; td1.appendChild(a); tr.appendChild(td1);
+    [e.sent,cn,ex].forEach((v,i)=>{ const td=document.createElement('td'); td.className='n'+(i===2&&v>0?' over':''); td.textContent=v; tr.appendChild(td); });
+    const tdb=document.createElement('td'); tdb.className='n';
+    [['−',-1],['+',1]].forEach(([l,d])=>{ const b=document.createElement('button'); b.className='ghost tiny'; b.textContent=l; b.setAttribute('aria-label',(d>0?'Add':'Remove')+' one ticket for '+id); b.onclick=()=>{ e.sent=Math.max(0,e.sent+d); save(); render(); }; tdb.appendChild(b); tdb.appendChild(document.createTextNode(' ')); });
+    tr.appendChild(tdb); tb.appendChild(tr);
+  }
+  const {t,p}=totals(), need=S.cfg.price>0?Math.ceil(S.cfg.prize/S.cfg.price):0;
+  $('tTickets').textContent=t; $('tNeed').textContent=need; $('tPlayers').textContent=p;
+  $('tValue').textContent=fmt(t*(S.cfg.price||0));
+  $('fill').style.width = need?Math.min(100,t/need*100)+'%':'0';
+  const ready = need>0 && t>=need;
+  $('draw').disabled = !(t>0);
+  $('drawNote').textContent = ready ? 'Break-even reached. Ready to draw.' : (t>0 ? 'Break-even not reached yet. Drawing now will ask you to confirm.' : 'Unlocks once there are tickets.');
+}
+
+function parseEvent(text, cfgc){
+  const plain = text.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ');
+  if(!plain.toLowerCase().includes(cfgc.item.toLowerCase())) return null;
+  if(cfgc.code && !plain.toLowerCase().includes(cfgc.code.toLowerCase())) return {skip:'no code word'};
+  const x = text.match(/XID=(\d+)[^>]*>([^<]*)</i); if(!x) return {skip:'no sender found'};
+  const q = plain.match(new RegExp('(\\d[\\d,]*)\\s*x\\s*'+cfgc.item.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i'));
+  const qty = q ? parseInt(q[1].replace(/,/g,''),10) : 1;
+  return { id:x[1], name:x[2].trim(), qty };
+}
+
+async function poll(){
+  const c = S.cfg; if(!c.key){ setStatus('Add your API key.', true); return; }
+  try{
+    const r = await fetch('https://api.torn.com/user/?selections=events&from='+S.since+'&comment=raffle&key='+encodeURIComponent(c.key));
+    const j = await r.json();
+    if(j.error){ setStatus('Torn API error '+j.error.code+': '+j.error.error, true); log('API error: '+j.error.error); if([2,10,13,16].includes(j.error.code)) pause(); return; }
+    const evs = j.events || {}; let added = 0;
+    Object.keys(evs).sort((a,b)=>evs[a].timestamp-evs[b].timestamp).forEach(k=>{
+      if(S.seen.includes(k)) return; S.seen.push(k);
+      const ev = evs[k], res = parseEvent(ev.event, c);
+      if(!res) return;
+      if(res.skip){ log('Ignored a box without a match ('+res.skip+')'); return; }
+      const en = S.entries[res.id] || (S.entries[res.id]={name:res.name,sent:0});
+      en.name = res.name; en.sent += res.qty; added += res.qty;
+      log('+'+res.qty+' from '+res.name+' ['+res.id+']'+(en.sent>c.cap?' (over cap, refund '+(en.sent-c.cap)+')':''));
+    });
+    save(); render();
+    setStatus('Last check '+new Date().toLocaleTimeString()+(added?' · +'+added+' new':'')+'.');
+  }catch(e){ setStatus('Network error. Will retry.', true); }
+}
+
+function begin(){
+  S.cfg = cfg(); if(!S.cfg.key){ setStatus('Add your API key first.', true); return; }
+  if(!S.since) S.since = Math.floor(Date.now()/1000);
+  S.running = true; save(); clearInterval(timer); poll(); timer = setInterval(poll, 30000);
+  setStatus('Running. Checking every 30 seconds.'); render();
+}
+function pause(){ S.running=false; clearInterval(timer); save(); setStatus('Paused.'); }
+
+$('start').onclick = begin;
+$('check').onclick = ()=>{ S.cfg=cfg(); save(); poll(); };
+$('stop').onclick = pause;
+['cap','price','prize','item','code'].forEach(id=>$(id).addEventListener('change',()=>{ S.cfg=cfg(); save(); render(); }));
+
+$('addManual').onclick = ()=>{
+  const id = (prompt('Player ID:')||'').trim(); if(!/^\d+$/.test(id)) return;
+  const n = parseInt(prompt('Number of tickets:','1'),10); if(!n) return;
+  const en = S.entries[id] || (S.entries[id]={name:prompt('Player name (optional):')||'',sent:0}); en.sent+=n; save(); render();
+};
+$('exportBtn').onclick = ()=>{
+  const lines = Object.keys(S.entries).map(id=>id+'\t'+(S.entries[id].name||'')+'\t'+counted(S.entries[id]));
+  navigator.clipboard.writeText('id\tname\ttickets\n'+lines.join('\n')).then(()=>setStatus('Entry list copied.'),()=>setStatus('Copy failed.', true));
+};
+$('reset').onclick = ()=>{
+  if(!confirm('Delete all entries and start over?')) return;
+  pause(); S.seen=[]; S.entries={}; S.since=0; S.result=null; save(); $('winner').textContent=''; $('proof').textContent=''; render(); log('Reset.');
+};
+
+function rand(n){ const m=Math.floor(4294967296/n)*n; const a=new Uint32Array(1); do{ crypto.getRandomValues(a); }while(a[0]>=m); return a[0]%n; }
+
+$('draw').onclick = ()=>{
+  const {t}=totals(), need=S.cfg.price>0?Math.ceil(S.cfg.prize/S.cfg.price):0;
+  if(t<need && !confirm('Break-even not reached ('+t+' of '+need+' tickets). Draw anyway?')) return;
+  const pool=[]; for(const id in S.entries){ const n=counted(S.entries[id]); for(let i=0;i<n;i++) pool.push(id); }
+  if(!pool.length) return;
+  const pick = rand(pool.length), win = pool[pick], names = Object.keys(S.entries).map(id=>S.entries[id].name||id);
+  $('draw').disabled = true; $('proof').textContent='';
+  let ticks=0; const spin=setInterval(()=>{
+    $('winner').textContent = names[Math.floor(Math.random()*names.length)];
+    if(++ticks>50){ clearInterval(spin);
+      const e=S.entries[win]; $('winner').innerHTML='';
+      const a=document.createElement('a'); a.href='https://www.torn.com/profiles.php?XID='+win; a.target='_blank'; a.rel='noopener';
+      a.textContent=(e.name||'Unknown')+' ['+win+']'; $('winner').appendChild(a);
+      $('proof').textContent='Winning ticket #'+(pick+1)+' of '+pool.length+' · drawn '+new Date().toLocaleString()+' with the browser’s secure random generator.';
+      S.result={win,pick:pick+1,total:pool.length}; save(); $('draw').disabled=false; log('Winner: '+(e.name||'')+' ['+win+'] (ticket '+(pick+1)+'/'+pool.length+')');
+    }
+  }, 60);
+};
+
+load();
+['key','code','cap','price','prize','item'].forEach(k=>{ if(S.cfg[k]!==undefined) $(k).value=S.cfg[k]; });
+if(!S.cfg.cap){ S.cfg=cfg(); }
+render();
+if(S.running && S.cfg.key){ begin(); }
+</script>
+</body>
+</html>
